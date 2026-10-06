@@ -1,4 +1,4 @@
-/* ============================================================================
+﻿/* ============================================================================
  * smoke-host — Host 半侧的离线测试
  * ----------------------------------------------------------------------------
  * 用假 ctx 把插件 apply() 起来，断言：
@@ -341,7 +341,42 @@ await test('agent/pre-step 命中时注入新消息，不改写原消息', async
   assert.equal(result.messages.length, 2)
   assert.match(result.messages[0].content[0].text, /本地记忆自动回忆/)
   assert.match(result.messages[0].content[0].text, /鉴权用的是轮询/)
+  assert.match(result.messages[0].id, /^dsh-local-memory:recall:/, '注入消息必须带 id')
+  assert.equal(result.messages[0].source.kind, 'dsh-local-memory')
+  assert.equal(result.messages[0].source.form, 'recall')
+  assert.equal(result.messages[0].source.memoryIds.length, 1)
   assert.equal(result.messages[1], original)
+})
+
+await test('注入消息必须带 source —— 裸消息会让整轮在 pre-step 挂掉', () => {
+  /* 逐字取自 @deepseek-ai/dsh-agent-instructions/lib/index.js（DSH 0.2.0-rc.2）：
+   *   const pending = agent.inbox.nextStep.filter(isAgentInstructionsMessage)
+   *   function isAgentInstructionsMessage(message) { return message.source.kind === "agent-instructions" }
+   *   function visibleBaselineSource(agent, authorityMessages) {
+   *     for (const message of authorityMessages.toReversed())
+   *       if (message.source.kind === "agent-instructions" && ...) return message.source
+   *   }
+   * 这两处对 `message.source` 都没有保护：注入的消息一旦缺 source，
+   * 抛出的正是 "Cannot read properties of undefined (reading 'kind')"，
+   * 表现为 turn/end 的 error（上一轮已确认过：store.markUsed 与失败同一秒）。 */
+  const isAgentInstructionsMessage = (message) => message.source.kind === 'agent-instructions'
+  const visibleBaselineSource = (authorityMessages) => {
+    for (const message of authorityMessages.toReversed()) {
+      if (message.source.kind === 'agent-instructions' && message.source.baseline === true) return message.source
+    }
+  }
+  const bare = { role: 'user', content: [{ type: 'text', text: 'x' }] }
+  assert.throws(() => isAgentInstructionsMessage(bare), TypeError)
+  assert.throws(() => visibleBaselineSource([bare]), TypeError)
+
+  const withSource = {
+    id: 'dsh-local-memory:recall:x',
+    role: 'user',
+    content: [{ type: 'text', text: 'x' }],
+    source: { kind: 'dsh-local-memory', form: 'recall', memoryIds: [] }
+  }
+  assert.equal(isAgentInstructionsMessage(withSource), false)
+  assert.equal(visibleBaselineSource([withSource]), undefined)
 })
 
 await test('agent/pre-step 无命中 / 短输入 / 斜杠命令时不注入', async () => {
@@ -499,6 +534,91 @@ await test('POST /memory 空内容 / 未知 action / 未知路由都给出明确
   })()
   assert.equal(badJson.res.statusCode, 400)
   assert.equal(badJson.json.error, 'invalid json')
+})
+
+await test('GET /export 返回 Markdown，可被 /import 导回来', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+  await toolByName(state, 'memory_save').execute({ text: '导出用的记忆', tags: ['exp'] }, {})
+
+  // 导出返回的是 Markdown，不能走会强解 JSON 的 callRoute
+  const exportReq = makeReq('GET', '/dsh-local-memory/export')
+  const exportRes = makeRes()
+  const exportPending = state.routes[0].handler(exportReq, exportRes)
+  await exportReq.emit()
+  await exportPending
+  const exported = { res: exportRes, body: exportRes.body }
+  assert.equal(exported.res.statusCode, 200)
+  assert.match(exported.res.headers['Content-Type'], /text\/markdown/)
+  assert.match(exported.res.headers['Content-Disposition'], /attachment/)
+  assert.match(exported.body, /本地记忆库导出/)
+  assert.match(exported.body, /导出用的记忆/)
+
+  // 清库后把刚才导出的 Markdown 导回来
+  clearAll()
+  const { ctx: ctx2, state: state2 } = makeCtx()
+  apply(ctx2)
+
+  const req = makeReq('POST', '/dsh-local-memory/import', exported.body)
+  const res = makeRes()
+  const pending = state2.routes[0].handler(req, res)
+  await req.emit()
+  await pending
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.added, 1)
+  assert.equal(payload.stats.count, 1)
+  assert.equal(payload.memories.some((m) => m.text === '导出用的记忆'), true)
+})
+
+await test('POST /import 支持 JSON 包装与 dryRun', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+
+  const md = ['# 导出', '', '---', '', '- 标签：external', '', '来自别处的记忆'].join('\n')
+  const req = makeReq('POST', '/dsh-local-memory/import', JSON.stringify({ markdown: md, dryRun: true }))
+  const res = makeRes()
+  const pending = state.routes[0].handler(req, res)
+  await req.emit()
+  await pending
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.parsed, 1)
+  assert.equal(payload.added, 1)
+  assert.equal(payload.stats.count, 0, 'dryRun 不该落盘')
+})
+
+await test('POST /import 空内容返回 0 条，不报错', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+  const req = makeReq('POST', '/dsh-local-memory/import', '   ')
+  const res = makeRes()
+  const pending = state.routes[0].handler(req, res)
+  await req.emit()
+  await pending
+  const payload = JSON.parse(res.body)
+  assert.equal(payload.ok, true)
+  assert.equal(payload.added, 0)
+})
+
+await test('配置里能保存并读回权重与删除前整理开关', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+
+  const saved = await callRoute(state, 'POST', '/dsh-local-memory/config', {
+    patch: { weights: { textMatch: 9, longTermBonus: 2 }, organizeBeforeDelete: true }
+  })
+  assert.equal(saved.json.ok, true)
+  assert.equal(saved.json.config.weights.textMatch, 9)
+  assert.equal(saved.json.config.weights.longTermBonus, 2)
+  // 未提供的权重键保持默认
+  assert.equal(saved.json.config.weights.tagMatch, DEFAULTS.weights.tagMatch)
+  assert.equal(saved.json.config.organizeBeforeDelete, true)
+  clearAll()
 })
 
 await test('信任栅栏：connection 拒绝时立刻结束响应', async () => {

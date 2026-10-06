@@ -2,12 +2,24 @@
 
 ## 一、装进去
 
+先确认自己的 profile 名（本插件的设置页挂在 web 界面上，通常叫 `desktop` 或 `web`）：
+
 ```powershell
-dsh plugin --profile desktop add "C:\Users\Administrator\Documents\deepseek-harness\default-workspace\dsh-local-memory"
+dsh plugin list
 ```
 
-> **路径要用绝对路径。** 用相对路径（如 `./dsh-local-memory`）会被解析成相对
-> **profile 目录**，装出来是个指不到东西的死链接（这个坑我踩过）。
+然后用**绝对路径**装：
+
+```powershell
+# Windows（把路径换成你解压后的实际位置）
+dsh plugin --profile desktop add "D:\plugins\dsh-local-memory"
+
+# macOS / Linux
+dsh plugin --profile desktop add /path/to/dsh-local-memory
+```
+
+> **路径一定要用绝对路径。** 用相对路径（如 `./dsh-local-memory`）会被解析成
+> 相对 **profile 目录**，装出来是个指不到东西的死链接（这个坑我踩过）。
 
 装完 **重启 dsh web**（关掉启动器窗口再重新双击），设置页会出现「**本地记忆**」。
 

@@ -142,21 +142,19 @@ await test('导出 apply / inject，inject 只声明 slots', () => {
   assert.deepEqual(Array.from(exports.inject), ['slots'])
 })
 
-await test('apply 注册 settings.section 且面板可渲染', () => {
+await test('apply 注册三个槽位：设置页 + 会话菜单项 + 弹窗', () => {
   const { exports } = runBundle()
 
-  let injectionKey = null
-  let meta = null
-  let factory = null
+  const injections = []
+  const registrations = []
   const ctx = {
     slots: {
       inject(key, callback) {
-        injectionKey = key
+        injections.push(key)
         return callback()
       },
       register(registration, renderFactory) {
-        meta = registration
-        factory = renderFactory
+        registrations.push({ registration, renderFactory })
         return () => {}
       }
     }
@@ -164,27 +162,47 @@ await test('apply 注册 settings.section 且面板可渲染', () => {
 
   exports.apply(ctx)
 
-  assert.equal(injectionKey, 'settings.section')
-  assert.equal(meta.name, 'settings.section')
-  assert.equal(meta.id, 'local-memory')
-  assert.equal(meta.label, '本地记忆')
-  assert.equal(typeof meta.order, 'number')
-  assert.notEqual(meta.id, 'startup-screen')
-  assert.notEqual(meta.id, 'hindsight-memory')
-  assert.ok(factory(), '工厂没返回元素')
+  assert.deepEqual(injections, [
+    'settings.section',
+    'sidebar.workspaces.session.menu.item',
+    'shell.overlay'
+  ])
+
+  const settings = registrations.find((r) => r.registration.name === 'settings.section')
+  assert.ok(settings, '没有注册 settings.section')
+  assert.equal(settings.registration.id, 'local-memory')
+  assert.equal(settings.registration.label, '本地记忆')
+  assert.equal(typeof settings.registration.order, 'number')
+  assert.notEqual(settings.registration.id, 'startup-screen')
+  assert.notEqual(settings.registration.id, 'hindsight-memory')
+  assert.ok(settings.renderFactory(), '设置页工厂没返回元素')
+
+  const menuItem = registrations.find((r) => r.registration.name === 'sidebar.workspaces.session.menu.item')
+  assert.ok(menuItem, '没有注册会话菜单项')
+  assert.equal(menuItem.registration.id, 'local-memory-organize')
+  // 必须夹在 fork(300) 与 archive(400) 之间
+  assert.ok(menuItem.registration.order > 300 && menuItem.registration.order < 400, String(menuItem.registration.order))
+  // 菜单项会收到壳注入的 props，工厂要能吃下
+  assert.ok(menuItem.renderFactory({ sessionId: 's-1', displayTitle: '标题' }) !== undefined)
+
+  const overlay = registrations.find((r) => r.registration.name === 'shell.overlay')
+  assert.ok(overlay, '没有注册弹窗')
+  assert.ok(overlay.renderFactory() !== undefined)
 })
 
-await test('面板只调用 /dsh-local-memory/* 三个接口', () => {
+await test('面板只调用 /dsh-local-memory/* 五个接口', () => {
   const urls = [...CLIENT_SOURCE.matchAll(/['"](\/[^'"]+)['"]/g)].map((m) => m[1])
   const apiUrls = [...new Set(urls)].filter((u) => u.startsWith('/'))
   assert.deepEqual(apiUrls.sort(), [
     '/dsh-local-memory/config',
+    '/dsh-local-memory/export',
+    '/dsh-local-memory/import',
     '/dsh-local-memory/memory',
     '/dsh-local-memory/state'
   ])
 })
 
-await test('设置页确实带有「查看记忆」与「写设置」的能力', () => {
+await test('设置页带有「查看记忆」「写设置」「导入导出」「权重」能力', () => {
   // 记忆浏览
   assert.match(CLIENT_SOURCE, /新增记忆/)
   assert.match(CLIENT_SOURCE, /编辑/)
@@ -195,6 +213,15 @@ await test('设置页确实带有「查看记忆」与「写设置」的能力',
   assert.match(CLIENT_SOURCE, /恢复默认/)
   assert.match(CLIENT_SOURCE, /启用本地记忆/)
   assert.match(CLIENT_SOURCE, /每轮自动回忆/)
+  // 导入 / 导出
+  assert.match(CLIENT_SOURCE, /导出 Markdown/)
+  assert.match(CLIENT_SOURCE, /导入 Markdown/)
+  // 权重
+  assert.match(CLIENT_SOURCE, /检索权重/)
+  assert.match(CLIENT_SOURCE, /正文命中/)
+  assert.match(CLIENT_SOURCE, /长词加成/)
+  // 删除前整理记忆
+  assert.match(CLIENT_SOURCE, /删除对话前提醒整理记忆/)
 })
 
 await test('样式注入带 data-plugin 标记，避免重复插入', () => {

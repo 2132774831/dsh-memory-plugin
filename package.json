@@ -1,7 +1,7 @@
 {
   "name": "dsh-local-memory",
-  "version": "1.0.0",
-  "description": "DeepSeek Harness 纯本地长期记忆：跨对话、跨项目，数据只存在本机一个 JSON 文件里，不联网、不调大模型、不需要 API key，并在设置页里直接查看/新增/编辑/删除记忆。",
+  "version": "1.1.0",
+  "description": "DeepSeek Harness 纯本地长期记忆：跨对话、跨项目，数据只存在本机一个 JSON 文件里，不联网、不调大模型、不需要 API key。设置页可直接查看/新增/编辑/删除记忆、调检索权重、导入导出 Markdown；会话菜单里有一键「整理记忆…」快记入口。",
   "keywords": [
     "dsh",
     "dsh-plugin",

@@ -8,12 +8,16 @@ import os from 'node:os'
 import path from 'node:path'
 
 import {
+  DEFAULT_WEIGHTS,
   MAX_TEXT_LENGTH,
   MemoryStore,
   STORE_VERSION,
   defaultStoreFile,
   normalizeText,
+  normalizeWeights,
+  parseMarkdown,
   scoreMemory,
+  toMarkdown,
   tokenize
 } from '../lib/store.js'
 
@@ -293,6 +297,179 @@ await test('不会留下 .tmp 残留文件', () => {
 await test('defaultStoreFile 落到 DSH_HOME 下', () => {
   assert.equal(defaultStoreFile('C:\\fake\\dsh'), path.join('C:\\fake\\dsh', 'dsh-local-memory.json'))
   assert.match(defaultStoreFile(), /dsh-local-memory\.json$/)
+})
+
+/* ── 权重 ───────────────────────────────────────────────────────────────── */
+
+await test('normalizeWeights 填默认、夹取区间、忽略非数字', () => {
+  assert.deepEqual(normalizeWeights(undefined), DEFAULT_WEIGHTS)
+  assert.deepEqual(normalizeWeights({}), DEFAULT_WEIGHTS)
+  assert.equal(normalizeWeights({ textMatch: 999 }).textMatch, 20)
+  assert.equal(normalizeWeights({ textMatch: -5 }).textMatch, 0)
+  assert.equal(normalizeWeights({ wholeQuery: 3.456 }).wholeQuery, 3.46)
+  assert.equal(normalizeWeights({ tagMatch: 'nope' }).tagMatch, DEFAULT_WEIGHTS.tagMatch)
+  // 未提供的键保持默认
+  assert.equal(normalizeWeights({ textMatch: 7 }).tagMatch, DEFAULT_WEIGHTS.tagMatch)
+})
+
+await test('权重真的影响打分', () => {
+  const memory = { text: '鉴权用的是轮询', tags: [] }
+  const terms = tokenize('鉴权')
+  const base = scoreMemory(memory, terms, normalizeText('鉴权'), DEFAULT_WEIGHTS)
+  const boosted = scoreMemory(memory, terms, normalizeText('鉴权'), { ...DEFAULT_WEIGHTS, textMatch: 10 })
+  const lowered = scoreMemory(memory, terms, normalizeText('鉴权'), { ...DEFAULT_WEIGHTS, textMatch: 0 })
+  assert.ok(boosted > base, '提高正文权重应当加分')
+  assert.ok(lowered < base, '降低正文权重应当减分')
+})
+
+await test('标签权重单独可调', () => {
+  const memory = { text: '无关正文', tags: ['topic:auth'] }
+  const terms = tokenize('auth')
+  const low = scoreMemory(memory, terms, '', { ...DEFAULT_WEIGHTS, tagMatch: 0 })
+  const high = scoreMemory(memory, terms, '', { ...DEFAULT_WEIGHTS, tagMatch: 8 })
+  assert.equal(low, 0)
+  assert.ok(high > 0)
+})
+
+await test('search 接受 weights 参数', () => {
+  const tmp = tempStore('weights')
+  try {
+    tmp.store.add({ text: '鉴权用轮询', tags: [] })
+    const a = tmp.store.search({ q: '鉴权', weights: { textMatch: 1 } })
+    const b = tmp.store.search({ q: '鉴权', weights: { textMatch: 5 } })
+    assert.equal(a.memories.length, 1)
+    assert.equal(b.memories.length, 1)
+  } finally {
+    tmp.cleanup()
+  }
+})
+
+/* ── Markdown 导出 / 导入 ────────────────────────────────────────────────── */
+
+await test('toMarkdown 产出可读结构，含元信息与正文', () => {
+  const md = toMarkdown([
+    { id: 'm-1', text: '鉴权用轮询', tags: ['topic:auth', 'pref'], project: 'demo', createdAt: 1700000000000, updatedAt: 1700000000000 }
+  ], { exportedAt: '2026-10-06T00:00:00.000Z' })
+  assert.match(md, /# 本地记忆库导出/)
+  assert.match(md, /- 条数：1/)
+  assert.match(md, /- 标签：topic:auth, pref/)
+  assert.match(md, /- 项目：demo/)
+  assert.match(md, /鉴权用轮询/)
+  assert.match(md, /---/)
+})
+
+await test('导出 → 解析 往返一致', () => {
+  const memories = [
+    { id: 'm-1', text: '第一条：鉴权用轮询', tags: ['topic:auth'], project: 'demo', createdAt: 1700000000000, updatedAt: 1700000000000 },
+    { id: 'm-2', text: '第二条：连接池配 20\n第二行', tags: ['perf'], project: '', createdAt: 1700000001000, updatedAt: 1700000001000 }
+  ]
+  const md = toMarkdown(memories)
+  const parsed = parseMarkdown(md)
+  assert.equal(parsed.length, 2)
+  assert.equal(parsed[0].text, '第一条：鉴权用轮询')
+  assert.deepEqual(parsed[0].tags, ['topic:auth'])
+  assert.equal(parsed[0].project, 'demo')
+  assert.equal(parsed[1].text, '第二条：连接池配 20\n第二行', '多行正文要保留换行')
+  assert.deepEqual(parsed[1].tags, ['perf'])
+})
+
+await test('空导出文件不会解析出垃圾记忆', () => {
+  const md = toMarkdown([])
+  assert.deepEqual(parseMarkdown(md), [])
+  assert.deepEqual(parseMarkdown(''), [])
+  assert.deepEqual(parseMarkdown(null), [])
+})
+
+await test('parseMarkdown 兼容外部格式：## 标题分节', () => {
+  const external = [
+    '# 我的笔记',
+    '',
+    '## Redis 缓存策略',
+    '',
+    '缓存穿透用布隆过滤器。',
+    '',
+    '## 部署约定',
+    '',
+    '一律走 CI，不手工发布。'
+  ].join('\n')
+  const parsed = parseMarkdown(external)
+  assert.equal(parsed.length, 2)
+  assert.match(parsed[0].text, /布隆过滤器/)
+  assert.match(parsed[1].text, /一律走 CI/)
+})
+
+await test('parseMarkdown 兼容外部格式：纯文本整篇', () => {
+  const parsed = parseMarkdown('就一句话，没有任何结构。')
+  assert.equal(parsed.length, 1)
+  assert.equal(parsed[0].text, '就一句话，没有任何结构。')
+})
+
+await test('parseMarkdown 认英文键名与全角/半角冒号', () => {
+  const md = ['# x', '', '---', '', '- tags: a, b', '- project: p1', '', 'English style body'].join('\n')
+  const parsed = parseMarkdown(md)
+  assert.equal(parsed.length, 1)
+  assert.deepEqual(parsed[0].tags, ['a', 'b'])
+  assert.equal(parsed[0].project, 'p1')
+  assert.equal(parsed[0].text, 'English style body')
+})
+
+await test('importMemories 新增 + 判重合并 + 幂等', () => {
+  const tmp = tempStore('import')
+  try {
+    const first = tmp.store.importMemories([
+      { text: '鉴权用轮询', tags: ['a'], project: 'p1' },
+      { text: '连接池配 20', tags: ['b'] }
+    ])
+    assert.equal(first.added, 2)
+    assert.equal(first.total, 2)
+
+    // 再次导入同一批：文本相同 → 合并，不新增
+    const second = tmp.store.importMemories([
+      { text: '鉴权用轮询', tags: ['c'], project: 'p2' }
+    ])
+    assert.equal(second.added, 0)
+    assert.equal(second.merged, 1)
+    assert.equal(second.total, 2)
+    const memory = tmp.store.read().memories.find((m) => m.text === '鉴权用轮询')
+    assert.deepEqual(memory.tags.sort(), ['a', 'c'])
+    assert.equal(memory.project, 'p2')
+  } finally {
+    tmp.cleanup()
+  }
+})
+
+await test('importMemories 跳过空正文，支持 dryRun', () => {
+  const tmp = tempStore('import-edge')
+  try {
+    const result = tmp.store.importMemories([{ text: '  ' }, { text: '有效' }])
+    assert.equal(result.added, 1)
+    assert.equal(result.skipped, 1)
+
+    const dry = tmp.store.importMemories([{ text: '还没写入' }], { dryRun: true })
+    assert.equal(dry.added, 1)
+    assert.equal(tmp.store.read().memories.some((m) => m.text === '还没写入'), false, 'dryRun 不该落盘')
+  } finally {
+    tmp.cleanup()
+  }
+})
+
+await test('导出后导入到另一个库，内容一致（跨电脑迁移场景）', () => {
+  const a = tempStore('migrate-a')
+  const b = tempStore('migrate-b')
+  try {
+    a.store.add({ text: '跨电脑迁移的记忆', tags: ['migrated'], project: 'proj' })
+    const md = toMarkdown(a.store.read().memories)
+    const parsed = parseMarkdown(md)
+    const result = b.store.importMemories(parsed)
+    assert.equal(result.added, 1)
+    const got = b.store.read().memories[0]
+    assert.equal(got.text, '跨电脑迁移的记忆')
+    assert.deepEqual(got.tags, ['migrated'])
+    assert.equal(got.project, 'proj')
+  } finally {
+    a.cleanup()
+    b.cleanup()
+  }
 })
 
 console.log(`\nsmoke-store: ${passed} passed, ${failed} failed`)
