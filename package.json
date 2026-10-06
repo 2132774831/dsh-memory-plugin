@@ -1,0 +1,49 @@
+{
+  "name": "dsh-local-memory",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness 纯本地长期记忆：跨对话、跨项目，数据只存在本机一个 JSON 文件里，不联网、不调大模型、不需要 API key，并在设置页里直接查看/新增/编辑/删除记忆。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "memory",
+    "local-memory",
+    "long-term-memory",
+    "offline"
+  ],
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./store": "./lib/store.js",
+    "./projects": "./lib/projects.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "test",
+    "cordis.patch.yml",
+    "README.md",
+    "INSTALL.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node test/smoke-store.mjs && node test/smoke-projects.mjs && node test/smoke-host.mjs && node test/smoke-client.mjs"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    }
+  }
+}
