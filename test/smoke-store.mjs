@@ -13,10 +13,12 @@ import {
   MemoryStore,
   STORE_VERSION,
   defaultStoreFile,
+  detectFormat,
   normalizeText,
   normalizeWeights,
   parseMarkdown,
   scoreMemory,
+  toHermesMarkdown,
   toMarkdown,
   tokenize
 } from '../lib/store.js'
@@ -470,6 +472,143 @@ await test('导出后导入到另一个库，内容一致（跨电脑迁移场�
     a.cleanup()
     b.cleanup()
   }
+})
+
+/* ── 格式判定（判断条件要写死、可测）────────────────────────────────────── */
+
+await test('detectFormat 五种格式各归其位', () => {
+  assert.equal(detectFormat('# Kun 记忆导出\n\n记录数量: 2\n\n## 其他\n[2026-07-31] - 甲\n[2026-08-10] - 乙'), 'kun')
+  // 没有标题，但有 2 行日期 → 也算 Kun
+  assert.equal(detectFormat('[2026-07-31] - 甲\n\n[2026-08-10] - 乙'), 'kun')
+  // 只有 1 行日期不算（避免正文里偶然一个日期就误判）
+  assert.notEqual(detectFormat('[2026-07-31] - 甲\n\n普通正文'), 'kun')
+
+  assert.equal(detectFormat('# 本地记忆库导出\n\n- 来源：dsh-local-memory@1.1.0\n\n---\n\n甲'), 'local-memory')
+  assert.equal(detectFormat('# 笔记\n\n---\n\n甲\n\n---\n\n乙'), 'rule-separated')
+  assert.equal(detectFormat('# 笔记\n\n## 第一节\n\n甲\n\n## 第二节\n\n乙'), 'heading-sections')
+  assert.equal(detectFormat('就一句话，没有任何结构'), 'single-document')
+  assert.equal(detectFormat('   '), 'single-document')
+})
+
+await test('parseMarkdown 的 Kun 格式：6 条拆开、日期进 createdAt', () => {
+  const kun = [
+    '# Kun 记忆导出',
+    '',
+    '导出时间: 2026-10-18T01:33:03.965Z',
+    '记录数量: 6',
+    '',
+    '## 指令', '',
+    '## 身份', '',
+    '## 职业', '',
+    '## 项目', '',
+    '## 偏好', '',
+    '## 其他',
+    '[2026-07-31] - 第一条：Blender 手办修复',
+    '',
+    '【已完成】',
+    '- 旧镰刀删除 (workspace: c:\\users\\administrator\\.kun\\default_workspace)',
+    '[2026-08-10] - 第二条：Hermes 开发方法论',
+    '',
+    '[2026-09-27] - 第三条：Blender MCP 调用方式',
+    ''
+  ].join('\n')
+
+  const withFormat = parseMarkdown(kun, { withFormat: true })
+  assert.equal(withFormat.format, 'kun')
+  assert.equal(withFormat.memories.length, 3)
+  assert.match(withFormat.memories[0].text, /Blender 手办修复/)
+  assert.match(withFormat.memories[1].text, /Hermes 开发方法论/)
+  assert.match(withFormat.memories[2].text, /Blender MCP/)
+  // 日期 → createdAt
+  assert.equal(new Date(withFormat.memories[0].createdAt).toISOString().slice(0, 10), '2026-07-31')
+  assert.equal(new Date(withFormat.memories[2].createdAt).toISOString().slice(0, 10), '2026-09-27')
+  // "记录数量: 6" 不能变成记忆
+  assert.equal(withFormat.memories.some((m) => /记录数量/.test(m.text)), false)
+})
+
+await test('parseMarkdown 的 --- 分隔：没有文档头时不吞第一条', () => {
+  const md = ['甲记忆', '', '---', '', '乙记忆', '', '---', '', '丙记忆'].join('\n')
+  assert.equal(detectFormat(md), 'rule-separated')
+  const parsed = parseMarkdown(md)
+  assert.equal(parsed.length, 3, '三条都要在，不能丢第一条')
+  assert.equal(parsed[0].text, '甲记忆')
+})
+
+await test('parseMarkdown 的本插件格式：文档头被丢弃', () => {
+  const md = toMarkdown([{ id: 'm-1', text: '甲', tags: [], project: '', createdAt: 1, updatedAt: 1 }])
+  assert.equal(detectFormat(md), 'local-memory')
+  const parsed = parseMarkdown(md)
+  assert.equal(parsed.length, 1)
+  assert.equal(parsed[0].text, '甲')
+})
+
+await test('withFormat 返回格式名与记忆列表', () => {
+  const r = parseMarkdown('随便一句话', { withFormat: true })
+  assert.equal(r.format, 'single-document')
+  assert.equal(r.memories.length, 1)
+  assert.deepEqual(parseMarkdown(''), [])
+  assert.deepEqual(parseMarkdown('', { withFormat: true }), { format: 'single-document', memories: [] })
+})
+
+/* ── Hermes Agent 格式（§ 分隔）────────────────────────────────────────── */
+
+await test('detectFormat 识别 Hermes（独占一行的 §）', () => {
+  const hermes = ['MEMORY  12.3% of 2200 chars used (271 chars)', '', '§', '', '第一条', '', '§', '', '第二条'].join('\n')
+  assert.equal(detectFormat(hermes), 'hermes')
+  // 正文里出现 § 但不在独立行 → 不算 Hermes
+  assert.equal(detectFormat('价格是 100§200 之间的一句话'), 'single-document')
+  // 文件头特征也能判成 Hermes
+  assert.equal(detectFormat('MEMORY  5% of 2200 chars used (110 chars)\n\n单条记忆'), 'hermes')
+})
+
+await test('parseMarkdown 的 Hermes 格式：按 § 拆开、丢掉容量头', () => {
+  const hermes = [
+    'MEMORY  12.3% of 2200 chars used (271 chars)',
+    '',
+    '§',
+    '',
+    '第一条记忆',
+    '第二行',
+    '',
+    '§',
+    '',
+    '第二条记忆',
+    ''
+  ].join('\n')
+
+  const r = parseMarkdown(hermes, { withFormat: true })
+  assert.equal(r.format, 'hermes')
+  assert.equal(r.memories.length, 2, '头部不能算一条')
+  assert.equal(r.memories[0].text, '第一条记忆\n第二行')
+  assert.equal(r.memories[1].text, '第二条记忆')
+  // 容量头不能变成记忆
+  assert.equal(r.memories.some((m) => /chars used/.test(m.text)), false)
+})
+
+await test('parseMarkdown 的 Hermes 格式：正文内的 § 不截断', () => {
+  // § 出现在行中间（不是独占一行），不能被当成分隔符
+  const hermes = ['第一条', '', '§', '', '含 § 符号但不在独立行', '正文§继续'].join('\n')
+  const r = parseMarkdown(hermes, { withFormat: true })
+  assert.equal(r.format, 'hermes')
+  assert.equal(r.memories.length, 2)
+  assert.match(r.memories[1].text, /含 § 符号但不在独立行/)
+  assert.match(r.memories[1].text, /正文§继续/)
+})
+
+await test('toHermesMarkdown 生成格式：容量头 + § 分隔 + 可回读', () => {
+  const md = toHermesMarkdown([{ text: '甲记忆' }, { text: '乙记忆' }], { kind: 'MEMORY' })
+  // 头部：类型 + 百分比 + 字符数
+  assert.match(md, /^MEMORY\s+\d+(\.\d+)?% of 2200 chars used \(\d+ chars\)/)
+  // 分隔符：独占一行的 §
+  assert.match(md, /\n\n§\n\n/)
+  // 回读
+  const back = parseMarkdown(md, { withFormat: true })
+  assert.equal(back.format, 'hermes')
+  assert.deepEqual(back.memories.map((m) => m.text), ['甲记忆', '乙记忆'])
+
+  // USER 库用 1375 上限
+  const user = toHermesMarkdown([{ text: '画像' }], { kind: 'USER' })
+  assert.match(user, /^USER PROFILE\s+.*of 1375 chars used/)
 })
 
 console.log(`\nsmoke-store: ${passed} passed, ${failed} failed`)
