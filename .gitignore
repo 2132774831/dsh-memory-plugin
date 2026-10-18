@@ -1,0 +1,16 @@
+# 依赖
+node_modules/
+
+# 打包产物（npm pack 会在这里生成 .tgz）
+*.tgz
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+
+# 编辑器 / 系统垃圾
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
