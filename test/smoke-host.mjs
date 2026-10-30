@@ -1,4 +1,4 @@
-﻿/* ============================================================================
+/* ============================================================================
  * smoke-host — Host 半侧的离线测试
  * ----------------------------------------------------------------------------
  * 用假 ctx 把插件 apply() 起来，断言：
@@ -413,6 +413,70 @@ await test('autoRecall=false 时不注入', async () => {
   )
   assert.equal(result.messages.length, 1)
   clearAll()
+})
+
+await test('系统合成的 user 消息（runtime-context 等）不触发注入', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+  await toolByName(state, 'memory_save').execute({ text: '鉴权用的是轮询' }, {})
+  const entry = state.listeners.find((item) => item.event === 'agent/pre-step')
+
+  for (const kind of ['runtime-context', 'tool-jobs', 'user-approval', 'skill-catalog', 'time-context']) {
+    const message = {
+      role: 'user',
+      content: [{ type: 'text', text: '鉴权轮询 webhook 相关的问题？' }],
+      source: { kind }
+    }
+    const decision = { kind: 'enter', messages: [message] }
+    const result = await entry.listener(
+      { agent: { id: 's1' }, messages: [message], turn: 1, step: 1 },
+      async () => decision
+    )
+    assert.equal(result.messages.length, 1, `kind=${kind} 的系统消息不该触发注入`)
+  }
+})
+
+await test('同一会话相同内容只注入一次；新会话/内容变化时重新注入', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+  await toolByName(state, 'memory_save').execute({ text: '鉴权用的是轮询而不是 webhook' }, {})
+  const entry = state.listeners.find((item) => item.event === 'agent/pre-step')
+
+  const userMsg = { role: 'user', content: [{ type: 'text', text: '我们鉴权怎么设计的？' }] }
+  const decision = { kind: 'enter', messages: [userMsg] }
+
+  const first = await entry.listener(
+    { agent: { id: 's1' }, messages: [userMsg], turn: 1, step: 0 },
+    async () => decision
+  )
+  assert.equal(first.messages.length, 2, '第一次要注入')
+
+  // 同一会话、同样的检索结果 → 不再注入（块已在历史里）
+  const second = await entry.listener(
+    { agent: { id: 's1' }, messages: [userMsg], turn: 2, step: 0 },
+    async () => decision
+  )
+  assert.equal(second.messages.length, 1, '相同内容不该重复注入')
+
+  // 另一个会话（新对话）→ 照常注入
+  const other = await entry.listener(
+    { agent: { id: 's2' }, messages: [userMsg], turn: 1, step: 0 },
+    async () => decision
+  )
+  assert.equal(other.messages.length, 2, '新会话要注入')
+
+  // 检索结果变化（新增相关记忆、换查询词）→ 注入新块
+  await toolByName(state, 'memory_save').execute({ text: '连接池配成 20' }, {})
+  const userMsg2 = { role: 'user', content: [{ type: 'text', text: '连接池配了多少？' }] }
+  const decision2 = { kind: 'enter', messages: [userMsg2] }
+  const third = await entry.listener(
+    { agent: { id: 's1' }, messages: [userMsg2], turn: 3, step: 0 },
+    async () => decision2
+  )
+  assert.equal(third.messages.length, 2, '内容变化后要注入')
+  assert.match(third.messages[0].content[0].text, /连接池/)
 })
 
 await test('agent/pre-step 尊重 reject 决策', async () => {
