@@ -178,14 +178,14 @@ await test('normalizeConfig 填默认值、夹取区间', () => {
 
 /* ── 注册面 ─────────────────────────────────────────────────────────────── */
 
-await test('apply 注册四个工具、一个提示词段、一条路由、一个事件监听', () => {
+await test('apply 注册五个工具、一个提示词段、一条路由、一个事件监听', () => {
   clearAll()
   const { ctx, state } = makeCtx()
   apply(ctx)
 
   assert.deepEqual(
     state.tools.map((tool) => tool.name).sort(),
-    ['memory_forget', 'memory_list', 'memory_save', 'memory_search']
+    ['memory_forget', 'memory_list', 'memory_review', 'memory_save', 'memory_search']
   )
   assert.equal(state.sections.length, 1)
   assert.equal(state.sections[0].name, 'dsh-local-memory:brief')
@@ -219,6 +219,72 @@ await test('提示词段能给出说明，enabled=false 时为空', () => {
   ctxPair = makeCtx()
   apply(ctxPair.ctx)
   assert.equal(ctxPair.state.sections[0].text({}), '')
+  clearAll()
+})
+
+await test('提示词段带「收工自检」规则：该存就直接存，不问用户', () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+  const text = state.sections[0].text({})
+  // 关键：必须明确「收工自检」这个动作，以及「不要问用户」
+  assert.match(text, /收工自检/, '缺「收工自检」触发点')
+  assert.match(text, /memory_save/, '没指明用哪个工具')
+  assert.match(text, /不要问用户/, '没写清「不要问用户要不要存」')
+  // 列举的触发场景至少覆盖：改代码、发布、装依赖、踩坑
+  assert.match(text, /改了代码/)
+  assert.match(text, /踩到坑/)
+  // 破坏性操作才需要问
+  assert.match(text, /删除记忆/)
+  clearAll()
+})
+
+await test('memory_review 给出体检报告，并刷新 lastReviewAt', async () => {
+  clearAll()
+  const { ctx, state } = makeCtx()
+  apply(ctx)
+  const save = toolByName(state, 'memory_save')
+  await save.execute({ text: '甲：项目约定用轮询鉴权' }, {})
+  await save.execute({ text: '乙：发布前先跑全部测试' }, {})
+
+  const review = toolByName(state, 'memory_review')
+  const out = await review.execute({}, {})
+  assert.match(out, /记忆库体检/)
+  assert.match(out, /共 2 条/)
+  assert.match(out, /没有标签/)
+
+  const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+  assert.ok(Number(cfg.lastReviewAt) > 0, 'lastReviewAt 应被刷新')
+  clearAll()
+})
+
+await test('提示词按 reviewIntervalDays 提醒体检；体检后、或设为 0 时不提醒', async () => {
+  clearAll()
+
+  // 从没体检过（lastReviewAt=0）→ 该提醒
+  let pair = makeCtx()
+  apply(pair.ctx)
+  assert.match(pair.state.sections[0].text({}), /记忆该体检了/)
+
+  // 体检一次 → 时间戳刷新 → 不再提醒
+  await toolByName(pair.state, 'memory_review').execute({}, {})
+  pair = makeCtx()
+  apply(pair.ctx)
+  assert.equal(/记忆该体检了/.test(pair.state.sections[0].text({})), false, '刚体检完不该再提醒')
+
+  // 假装 40 天前体检过 → 又该提醒，且说出天数
+  writeConfig({ lastReviewAt: Date.now() - 40 * 24 * 60 * 60 * 1000 })
+  pair = makeCtx()
+  apply(pair.ctx)
+  const overdueText = pair.state.sections[0].text({})
+  assert.match(overdueText, /记忆该体检了/)
+  assert.match(overdueText, /40 天/)
+
+  // reviewIntervalDays=0 → 关掉提醒
+  writeConfig({ reviewIntervalDays: 0 })
+  pair = makeCtx()
+  apply(pair.ctx)
+  assert.equal(/记忆该体检了/.test(pair.state.sections[0].text({})), false, 'interval=0 应关闭提醒')
   clearAll()
 })
 
